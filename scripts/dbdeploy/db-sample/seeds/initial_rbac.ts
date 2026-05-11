@@ -7,29 +7,21 @@
  * 1. The RBAC tables must exist (run migration 20260416000001_rbac_tables).
  * 2. The users table must already be populated (run initial_users seed first).
  */
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import {
-  permissions,
-  rolePermissions,
-  roles,
-  tenants,
-  userTenantRoles,
-} from '../../../../common/compiled/node/services/db/schema.ts';
+import type { Knex } from 'knex';
 
-// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
-export async function seed(db: NodePgDatabase<any>): Promise<void> {
+export async function seed(knex: Knex): Promise<void> {
   // ── 1. Clean up in reverse FK order ────────────────────────────────────────
-  await db.delete(userTenantRoles);
-  await db.delete(rolePermissions);
-  await db.delete(roles);
-  await db.delete(permissions);
-  await db.delete(tenants);
+  await knex('user_tenant_roles').del();
+  await knex('role_permissions').del();
+  await knex('roles').del();
+  await knex('permissions').del();
+  await knex('tenants').del();
 
   // ── 2. Tenants ──────────────────────────────────────────────────────────────
-  await db.insert(tenants).values([{ id: 1, name: 'Default', slug: 'default', is_active: true }]);
+  await knex('tenants').insert([{ id: 1, name: 'Default', slug: 'default', is_active: true }]);
 
   // ── 3. Permissions ──────────────────────────────────────────────────────────
-  await db.insert(permissions).values([
+  await knex('permissions').insert([
     { id: 1, name: 'users:read', description: 'Read user records' },
     { id: 2, name: 'users:write', description: 'Create and update users' },
     { id: 3, name: 'reports:read', description: 'View reports' },
@@ -37,14 +29,14 @@ export async function seed(db: NodePgDatabase<any>): Promise<void> {
   ]);
 
   // ── 4. Roles (scoped to tenant 1) ───────────────────────────────────────────
-  await db.insert(roles).values([
+  await knex('roles').insert([
     { id: 1, tenant_id: 1, name: 'TestGroup', description: 'Standard group role' },
     { id: 2, tenant_id: 1, name: 'TestGithub', description: 'GitHub SSO users' },
     { id: 3, tenant_id: 1, name: 'TestGmail', description: 'Gmail SSO users' },
   ]);
 
   // ── 5. Role → permission grants ─────────────────────────────────────────────
-  await db.insert(rolePermissions).values([
+  await knex('role_permissions').insert([
     { role_id: 1, permission_id: 1 },
     { role_id: 1, permission_id: 3 },
     { role_id: 2, permission_id: 1 },
@@ -54,7 +46,7 @@ export async function seed(db: NodePgDatabase<any>): Promise<void> {
   ]);
 
   // ── 6. User → tenant → role assignments ────────────────────────────────────
-  await db.insert(userTenantRoles).values([
+  await knex('user_tenant_roles').insert([
     { user_id: 1, tenant_id: 1, role_id: 1 },
     { user_id: 2, tenant_id: 1, role_id: 2 },
     { user_id: 3, tenant_id: 1, role_id: 3 },
