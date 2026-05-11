@@ -38,7 +38,7 @@ export const setRefreshToken = async (id: string | number, refresh_token: string
       .values({ id, refresh_token })
       .onConflictDoUpdate({ target: sql`id`, set: { refresh_token } });
   } else {
-    await tokenStore().set(id, refresh_token);
+    await tokenStore().set(String(id), refresh_token);
   }
 };
 
@@ -50,7 +50,7 @@ export const getRefreshToken = async (id: string | number) => {
     );
     return result.rows[0]?.refresh_token ?? null;
   }
-  return tokenStore().get(id);
+  return tokenStore().get(String(id));
 };
 
 /** Delete a user's refresh token, effectively invalidating their session. */
@@ -58,7 +58,7 @@ export const revokeRefreshToken = async (id: string | number) => {
   if (_tokenServiceType === 'drizzle') {
     await db().execute(sql`DELETE FROM ${sql.identifier(JWT_REFRESH_STORE_NAME)} WHERE id = ${id}`);
   } else {
-    await tokenStore().delete(id);
+    await tokenStore().delete(String(id));
   }
 };
 
