@@ -186,7 +186,7 @@ const store = useMainStore();
 const route = useRoute();
 const i18n = useI18n();
 const loading = store.loading;
-const email = ref('test');
+const username = ref('test');
 const password = ref('test');
 const errorMessage = ref('');
 const mode = ref('login'); // login, otp
@@ -237,7 +237,7 @@ const login = async () => {
   errorMessage.value = '';
   try {
     const { data } = await http.post('/api/auth/login', {
-      email: email.value,
+      email: username.value,
       password: password.value,
     });
     if (data.otp) {
