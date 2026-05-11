@@ -3,7 +3,7 @@
     <form class="form-box-flex">
       <div v-show="mode === 'login'">
         <h1>{{ i18n.$t('sign_in') }}</h1>
-        <a-input data-cy="username" label="Username" type="text" v-model:value="email"></a-input>
+        <a-input data-cy="email" label="Email" type="text" v-model:value="username"></a-input>
         <a-input data-cy="password" label="Password" type="password" v-model:value="password"></a-input>
         <a-checkbox v-model:checked="forced">Force Login</a-checkbox>
         <div class="buttons-box-flex"><a-button data-cy="login" @click="login">Login</a-button></div>
@@ -22,12 +22,12 @@
 </template>
 
 <script setup>
+import parseJwt from '@common/iso/parse-jwt.js';
 import { http } from '@common/vue/plugins/fetch.js';
 import { useI18n } from '@common/vue/plugins/i18n.js';
+import { useMediaQuery } from '@common/vue/plugins/useMediaQuery.js';
 import { onBeforeUnmount, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { useMediaQuery } from '../../../common/plugins/useMediaQuery.js';
-import parseJwt from '../../../common/vanilla/web/parse-jwt.js';
 import { useMainStore } from '../store.js';
 
 const { VITE_REFRESH_URL, MODE } = import.meta.env;
@@ -35,7 +35,7 @@ const store = useMainStore();
 const route = useRoute();
 const i18n = useI18n();
 const loading = store.loading;
-const email = ref('test');
+const username = ref('test');
 const password = ref('test');
 const errorMessage = ref('');
 const mode = ref('login'); // login, otp
@@ -89,7 +89,7 @@ const login = async () => {
   errorMessage.value = '';
   try {
     const { data } = await http.post('/api/auth/login', {
-      email: email.value,
+      email: username.value,
       password: password.value,
     });
     if (data.otp) {

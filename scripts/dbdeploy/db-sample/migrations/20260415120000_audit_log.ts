@@ -36,7 +36,13 @@ export async function up(knex: Knex): Promise<void> {
 
   // Append-only: revoke mutating permissions from all application roles
   await knex.raw(`REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC`);
-  await knex.raw(`REVOKE UPDATE, DELETE ON audit_log FROM api_role`);
+  await knex.raw(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'api_role') THEN
+        REVOKE UPDATE, DELETE ON audit_log FROM api_role;
+      END IF;
+    END $$
+  `);
 
   // Dedicated read-only role for auditors (idempotent via DO block)
   await knex.raw(`

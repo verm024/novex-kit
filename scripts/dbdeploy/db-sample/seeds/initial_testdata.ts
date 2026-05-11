@@ -1,29 +1,20 @@
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import {
-  award,
-  country,
-  state,
-  student,
-  studentSubject,
-  subject,
-} from '../../../../common/compiled/node/services/db/schema.ts';
+import type { Knex } from 'knex';
 import countriesJson from './icc.json' with { type: 'json' };
 import statesJson from './state.json' with { type: 'json' };
 
-// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
-export async function seed(db: NodePgDatabase<any>): Promise<void> {
-  await db.delete(studentSubject);
-  await db.delete(subject);
-  await db.delete(student);
-  await db.delete(award);
-  await db.delete(country);
-  await db.delete(state);
+export async function seed(knex: Knex): Promise<void> {
+  await knex('student_subject').del();
+  await knex('subject').del();
+  await knex('student').del();
+  await knex('award').del();
+  await knex('country').del();
+  await knex('state').del();
 
-  const countries = countriesJson.map(c => ({ ...c, updated: new Date() }));
-  await db.insert(country).values(countries);
-  await db.insert(state).values(statesJson);
+  const countries = countriesJson.map(c => ({ ...c, updated: new Date().toISOString() }));
+  await knex('country').insert(countries);
+  await knex('state').insert(statesJson);
 
-  await db.insert(subject).values([
+  await knex('subject').insert([
     { code: 'EL1', name: 'English', passingGrade: 40 },
     { code: 'EM', name: 'E Math', passingGrade: 41 },
     { code: 'AM', name: 'A Math', passingGrade: 42 },
@@ -31,7 +22,7 @@ export async function seed(db: NodePgDatabase<any>): Promise<void> {
     { code: 'CHEM', name: 'Chemistry', passingGrade: 44 },
   ]);
 
-  await db.insert(award).values([
+  await knex('award').insert([
     { code: 'ac', name: 'Academic' },
     { code: 'sp', name: 'Sports' },
     { code: 'cv', name: 'Civics' },
@@ -45,26 +36,26 @@ export async function seed(db: NodePgDatabase<any>): Promise<void> {
     awards: '',
     sex: idx % 2 === 0 ? 'M' : 'F',
     age: idx + 15,
-    gpa: String((idx + 1) % 5),
+    gpa: (idx + 1) % 5,
     birthDate: '1976-04-19',
-    birthTime: '06:00',
+    birthTime: '0600',
     country: 'SG',
     state: '',
-    dateTimeTz: new Date(),
+    dateTimeTz: new Date().toISOString(),
     secret: '1234',
     remarks: '',
     updated_by: 'someone',
-    updated_at: new Date(),
+    updated_at: new Date().toISOString(),
   }));
-  const insertedStudents = await db.insert(student).values(students).returning({ id: student.id });
-  const s1 = insertedStudents[0].id;
-  const s2 = insertedStudents[1].id;
+  const insertedStudents = await knex('student').insert(students).returning('id');
+  const s1: number = insertedStudents[0].id ?? insertedStudents[0];
+  const s2: number = insertedStudents[1].id ?? insertedStudents[1];
 
-  await db.insert(studentSubject).values([
-    { studentId: s1, subjectCode: 'EM', gradeFinal: 'A', gradeDate: new Date('2024-10-01') },
-    { studentId: s1, subjectCode: 'AM', gradeFinal: 'B', gradeDate: new Date('2024-10-01') },
-    { studentId: s1, subjectCode: 'PHY', gradeFinal: 'D', gradeDate: new Date('2024-10-01') },
-    { studentId: s2, subjectCode: 'EM', gradeFinal: 'C', gradeDate: new Date('2024-10-02') },
-    { studentId: s2, subjectCode: 'CHEM', gradeFinal: 'B', gradeDate: new Date('2024-10-02') },
+  await knex('student_subject').insert([
+    { studentId: s1, subjectCode: 'EM', gradeFinal: 'A', gradeDate: '2024-10-01' },
+    { studentId: s1, subjectCode: 'AM', gradeFinal: 'B', gradeDate: '2024-10-01' },
+    { studentId: s1, subjectCode: 'PHY', gradeFinal: 'D', gradeDate: '2024-10-01' },
+    { studentId: s2, subjectCode: 'EM', gradeFinal: 'C', gradeDate: '2024-10-02' },
+    { studentId: s2, subjectCode: 'CHEM', gradeFinal: 'B', gradeDate: '2024-10-02' },
   ]);
 }
