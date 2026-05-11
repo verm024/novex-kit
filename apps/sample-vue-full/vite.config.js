@@ -46,9 +46,9 @@ export default ({ command, mode }) => {
     resolve: {
       alias: {
         // https://github.com/vitejs/vite/issues/279#issuecomment-636110354
-        '@common/vue': path.resolve(root, 'common/compiled/vue'),
-        '@common/iso': path.resolve(root, 'common/vanilla/iso'),
-        '@common/web': path.resolve(root, 'common/vanilla/web'),
+        '@common/vue': path.resolve('../../common/compiled/vue'),
+        '@common/web': path.resolve('../../common/vanilla/web'),
+        '@common/iso': path.resolve('../../common/vanilla/iso'),
       },
     },
     server: {
