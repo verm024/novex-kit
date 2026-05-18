@@ -84,19 +84,23 @@ const generateTable = async (req: T4TRequest, _res: Response, next: NextFunction
   const { database, filename } = svc.get(req?.table?.conn)?.client?.config?.connection || {};
   req.table.db = database || filename || 'DB Not Found';
 
+  // normalise roles — req.user.roles may be string[] (JWT) or comma-string (legacy)
+  const userRoles = req.user?.[roleKey];
+  const roleStr: string = Array.isArray(userRoles) ? userRoles.join(',') : ((userRoles as string) ?? '');
+
   // permissions settings
-  req.table.view = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.view);
+  req.table.view = roleOperationMatch(roleStr, req.table.view);
   const acStr = '/autocomplete';
   const acLen = acStr.length;
   if (req.path.substring(req.path.length - acLen) === acStr) {
     logger.info('auto complete here...');
     return next();
   }
-  req.table.create = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.create);
-  req.table.update = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.update);
-  req.table.delete = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.delete);
-  req.table.import = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.import);
-  req.table.export = roleOperationMatch((req.user?.[roleKey] ?? '') as string, req.table.export);
+  req.table.create = roleOperationMatch(roleStr, req.table.create);
+  req.table.update = roleOperationMatch(roleStr, req.table.update);
+  req.table.delete = roleOperationMatch(roleStr, req.table.delete);
+  req.table.import = roleOperationMatch(roleStr, req.table.import);
+  req.table.export = roleOperationMatch(roleStr, req.table.export);
 
   // sanitize
   req.table.deleteLimit = Number(req.table.deleteLimit) || -1;
@@ -116,9 +120,9 @@ const generateTable = async (req: T4TRequest, _res: Response, next: NextFunction
     if (col.required) req.table.required.push(key);
     if (col?.ui?.tag === 'files') req.table.fileConfigUi[key] = col?.ui;
 
-    col.editor = !(col.editor && !roleOperationMatch((req.user?.[roleKey] ?? '') as string, col.editor, key));
+    col.editor = !(col.editor && !roleOperationMatch(roleStr, col.editor, key));
     if (!col.editor && col.edit) col.edit = 'readonly';
-    col.creator = !(col.creator && !roleOperationMatch((req.user?.[roleKey] ?? '') as string, col.creator, key));
+    col.creator = !(col.creator && !roleOperationMatch(roleStr, col.creator, key));
     if (!col.creator && col.add) col.add = 'readonly';
   }
   // logger.info(req.table)
