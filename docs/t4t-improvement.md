@@ -1,8 +1,257 @@
 # T4T Improvement Plan
 
-This document outlines multiple approaches for improving the T4T system based on the manager's requirements. Choose one approach or combine elements from multiple approaches.
+## TL;DR — Two Phases
 
-## Manager's Requirements (Summary)
+| | Phase 1 | Phase 2 |
+|---|---|---|
+| **Goal** | No YAML, no Knex, works end-to-end | Drizzle schema as source of truth for structure |
+| **Effort** | ~1–2 weeks | ~2–3 weeks |
+| **Risk** | Low | Medium |
+
+---
+
+## Right Now — What You Need Before Testing
+
+The router is mounted and the role bug is fixed. To test T4T from the frontend you still need:
+
+1. **Set `KNEXFILE_PG` in `apps/sample-api/.env`** (the secrets file, not `.env.json`):
+   ```
+   KNEXFILE_PG=postgresql://postgres@127.0.0.1:5432/postgres
+   ```
+   Set this to the same value as `DRIZZLE_PG`. T4T's Knex connection reads from this env var.
+
+2. **Run the Knex migrations** in `scripts/dbdeploy/db-sample/` — these create the T4T sample tables (`student`, `country`, `state`, etc.):
+   ```sh
+   cd scripts/dbdeploy/db-sample
+   npx knex migrate:latest
+   ```
+
+3. **Restart sample-api**, then open `http://127.0.0.1:8080/t4t-student` in the frontend.
+
+---
+
+## Phase 1 — No YAML, No Knex
+
+### The core change: replace `.yaml` files with `.ts` files
+
+**Why not Zod?** Zod's `.describe()` only accepts a string — it cannot carry structured UI metadata like `{ tag: 'input', attrs: { maxlength: 20 } }`. Using Zod `.meta()` or OpenAPI extensions requires third-party libraries and still produces the same config structure — just in a worse format. TypeScript objects are the right tool.
+
+**Why not embed metadata in the Drizzle schema?** The Drizzle schema is shared across the whole codebase (auth, generate-crud, migrations). Mixing T4T UI concerns (labels, permissions, filter flags) into it couples T4T to every other consumer of the schema. Keep them separate.
+
+**The answer: TypeScript config files** — same information as today's YAML but in `.ts`, fully typed, IDE autocompletion, compile-time validation, no YAML parser needed.
+
+#### What `tables/student.ts` looks like (replaces `student.yaml`):
+
+```ts
+import type { T4tTableConfig } from '../types.ts';
+
+export default {
+  name: 'student',
+  conn: 'drizzle1',            // ← was 'knex1', now drizzle
+  displayName: 'Students',
+  view: 'admin,editor,viewer',
+  create: 'admin',
+  update: 'admin,editor',
+  delete: 'admin',
+  import: 'admin,editor',
+  export: 'admin,editor',
+  deleteLimit: 1,
+  audit: true,
+  multiSelect: false,
+  cols: {
+    id:        { label: 'ID',         auto: 'pk', edit: 'readonly' },
+    firstName: { label: 'First Name', required: true, add: true, edit: true,
+                 filter: true, sort: true, type: 'string',
+                 ui: { tag: 'input', attrs: { type: 'text', maxlength: 20 } } },
+    lastName:  { label: 'Last Name',  required: true, add: true, edit: true,
+                 filter: true, type: 'string', ui: { tag: 'input' } },
+    country:   { label: 'Country',    add: true, edit: true, type: 'string',
+                 options: { conn: 'drizzle1', tableName: 'country', key: 'code', text: 'name' } },
+  },
+} satisfies T4tTableConfig;
+```
+
+The `satisfies T4tTableConfig` line makes TypeScript check the shape at compile time. Wrong field names or bad types become compile errors, not runtime surprises.
+
+#### Changes required in `t4t.ts`
+
+Replace the YAML read:
+```ts
+// Before
+const doc = yaml.load(fs.readFileSync(docPath, 'utf8'));
+
+// After — dynamic import, cached at startup
+const { default: doc } = await import(`${CONFIGS_FOLDER_PATH}${tableKey}.ts`);
+```
+
+Add a startup cache — load all configs once when the router initialises, not on every request. A `Map<string, TableDef>` keyed by table name.
+
+Remove: `import yaml from 'js-yaml'`, `import fs from 'node:fs'`.
+
+#### Port `t4t-base.ts` from Knex to Drizzle
+
+Every `svc.get(table.conn)(table.name).where(...)` Knex call becomes a Drizzle query. The table reference comes from the Drizzle schema object (looked up by `table.name` at startup).
+
+```ts
+// Before (Knex)
+const rows = await svc.get('knex1')('student').where(filters).limit(10).offset(0);
+
+// After (Drizzle)
+const db = svc.get('drizzle1').get();
+const tableRef = schema[table.name]; // schema imported from @common/node/services/db/schema
+const rows = await db.select().from(tableRef).where(and(...conditions)).limit(10).offset(0);
+```
+
+Key Drizzle equivalents:
+
+| T4T operation | Drizzle |
+|---|---|
+| `find` with filters + pagination | `db.select().from(t).where(and(...)).limit(n).offset(m)` |
+| `findOne` | `db.select().from(t).where(eq(t.pk, val)).limit(1)` |
+| `count` for pagination total | `db.select({ count: sql\`count(*)\` }).from(t).where(...)` |
+| `create` | `db.insert(t).values(body).returning()` |
+| `update` | `db.update(t).set(body).where(eq(t.pk, key)).returning()` |
+| `remove` | `db.delete(t).where(inArray(t.pk, keys))` |
+| FK join (autocomplete) | `db.select().from(t1).leftJoin(t2, eq(t1.fkCol, t2.pk))` |
+
+#### Add `T4tTableConfig` type to `types.ts`
+
+```ts
+// T4tTableConfig = what you write in the .ts config file (before middleware enrichment)
+// TableDef        = what generateTable produces after merging config + permissions
+export interface T4tTableConfig extends Omit<TableDef, 'pk' | 'multiKey' | 'required' | 'auto' | 'fileConfigUi' | 'db'> {}
+```
+
+### Phase 1 checklist
+
+- [ ] Add `T4tTableConfig` type to `types.ts`
+- [ ] Write `tables/student.ts`, `tables/subject.ts`, etc. (one per table, replaces `.yaml`)
+- [ ] In `t4t.ts`: replace `fs.readFileSync` + `yaml.load` with dynamic `import()`
+- [ ] In `t4t.ts`: add startup config cache (`Map<string, T4tTableConfig>`)
+- [ ] In `t4t-base.ts`: replace all Knex queries with Drizzle equivalents
+- [ ] Remove `js-yaml` import from `t4t.ts`
+- [ ] Set `conn: 'drizzle1'` in all table configs
+- [ ] Remove `knex1` from `SERVICES_CONFIG` in `.env.json` (Knex no longer needed at runtime)
+- [ ] Keep `KNEXFILE_PG` in `.env.json` as a comment — the CLI migration tool in `dbdeploy` still uses it
+
+### What stays the same after Phase 1
+
+- All T4T API endpoints (`/api/t4t/find/:table`, etc.) — no frontend changes needed
+- `T4t.vue` — no changes needed
+- Permission model — role strings work the same way
+- YAML table structure — same fields, just in TypeScript
+- Custom override system (`custom/`)
+- File upload + CSV import/export
+
+---
+
+## Phase 2 — Drizzle Schema as Source of Truth
+
+### The goal
+
+Today, a table config declares `{ type: 'string', required: true }` even though that information already exists in the Drizzle schema as `varchar().notNull()`. Phase 2 eliminates that duplication.
+
+At T4T startup:
+1. Read the Drizzle schema tables via the same Symbol-based introspection that `generate-crud.ts` already uses.
+2. Auto-derive: column names, types, `required`, PK identification, FK relationships (for join + autocomplete).
+3. The TypeScript config file shrinks to **only** what the schema cannot provide: permissions, UI labels, input tags, filter/sort flags.
+
+#### What the config file shrinks to (Phase 2):
+
+```ts
+export default {
+  displayName: 'Students',
+  view: 'admin,editor,viewer',
+  create: 'admin',
+  update: 'admin,editor',
+  delete: 'admin',
+  import: 'admin,editor',
+  export: 'admin,editor',
+  audit: true,
+  cols: {
+    id:        { label: 'ID',         hide: true },
+    firstName: { label: 'First Name', add: true, edit: true, filter: true,
+                 ui: { tag: 'input', attrs: { maxlength: 20 } } },
+    lastName:  { label: 'Last Name',  add: true, edit: true, filter: true },
+    country:   { label: 'Country',    add: true, edit: true,
+                 ui: { tag: 'autocomplete', text: 'name' } },
+    // No `type`, `required`, FK boilerplate — all derived from schema
+  },
+} satisfies T4tSupplement;
+```
+
+The config loses: `name`, `conn`, `type` per column, `required` per column, `auto: 'pk'`, most of the `options:` FK block. Those come from the schema.
+
+#### What gets auto-derived
+
+| Config field removed | Derived from Drizzle schema |
+|---|---|
+| `name` (table name) | `getTableName(schema.student)` |
+| `col.type` | `col.getSQLType()` → `string/integer/decimal/boolean/datetime` |
+| `col.required` | `col.notNull === true` |
+| `col.auto: 'pk'` | column has `.primaryKey()` |
+| `col.auto: 'ts'` | column has `.defaultNow()` |
+| FK `options.tableName`, `options.key` | `col.references()` → target table + column |
+| Composite PK (`multiKey`) | `primaryKey({ columns: [...] })` |
+
+Note: **`options.text`** (which column in the related table to display as label) cannot be derived — it stays in the config. A DB FK only tells you the target table and PK, not which text column to show in a dropdown.
+
+#### Implementation
+
+Write `t4t-schema.ts` — a runtime introspector (not a code generator):
+
+```ts
+import * as schema from '@common/node/services/db/schema.ts';
+import { getTableName, getTableColumns } from 'drizzle-orm';
+
+export function introspectTable(tableName: string): Partial<T4tTableConfig> {
+  const table = Object.values(schema).find(t => getTableName(t) === tableName);
+  if (!table) return {};
+  const cols: Record<string, Partial<ColDef>> = {};
+  for (const [colKey, col] of Object.entries(getTableColumns(table))) {
+    cols[colKey] = {
+      type: mapSqlTypeToT4t(col.getSQLType()),
+      required: 'notNull' in col ? col.notNull : false,
+      ...(col.primary ? { auto: 'pk' } : {}),
+      // FK reference
+      ...(col.references ? { options: { ...deriveFkOptions(col) } } : {}),
+    };
+  }
+  return { name: tableName, cols };
+}
+```
+
+Then `generateTable` merges: `introspect(tableName)` (base) + supplement config (overrides).
+
+### Phase 2 checklist
+
+- [ ] Write `t4t-schema.ts` introspector using `getTableName` + `getTableColumns` from `drizzle-orm`
+- [ ] Write `mergeTableConfig(introspected, supplement)` function
+- [ ] Shrink all table `.ts` config files to supplement-only fields
+- [ ] Add `T4tSupplement` type (subset of `T4tTableConfig`, everything optional)
+- [ ] Update `generateTable` to call introspect → merge → cache
+
+---
+
+## What Does NOT Change (Ever)
+
+These stay regardless of phase:
+
+- `/api/t4t/config/:table` — frontend always reads this endpoint
+- `T4t.vue` — no changes needed in either phase
+- The permissions model — role strings in config, checked in `generateTable`
+- File upload via multer — stays in config
+- CSV import/export — stays as generic handlers
+- `custom/` override system — still works per-table
+
+---
+
+## Questions to Confirm with Manager
+
+1. For FK autocomplete: which column in the related table is the display text (e.g., `name` in `country`)? Can this be annotated in the Drizzle schema, or always declared in the supplement config?
+2. Should the Drizzle schema gain real FK constraints (`.references()`) for all T4T relationships? Currently `student.country` is just a `varchar`, not a FK to `country.code`. Phase 2's FK auto-derivation only works if FK constraints exist in the schema.
+3. Is `bwc-t4t-form.js` (the no-bundler web component) worth maintaining alongside `T4t.vue`, or should it be deprecated?
+
 
 - T4T should be a simple, universal editor — like the bot builder.
 - **Schema as single source of truth**: stop re-declaring column names, types, and FK relations in YAML. Derive them from the Drizzle schema.
