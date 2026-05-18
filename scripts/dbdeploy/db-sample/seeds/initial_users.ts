@@ -1,18 +1,21 @@
 import crypto from 'node:crypto';
-import type { Knex } from 'knex';
+// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { setScryptHash } from '../../../../common/compiled/node/auth/scrypt.ts';
+import { users } from '../../../../common/compiled/node/services/db/schema.ts';
 
-export async function seed(knex: Knex): Promise<void> {
+// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
+export async function seed(db: NodePgDatabase<any>): Promise<void> {
   const salt = crypto.randomBytes(16).toString('hex');
   const password = await setScryptHash('test', salt);
 
   try {
-    await knex('users').del();
+    await db.delete(users);
   } catch (e) {
     console.log((e as Error).toString());
   }
 
-  await knex('users').insert([
+  await db.insert(users).values([
     {
       id: 1,
       roles: 'TestGroup',

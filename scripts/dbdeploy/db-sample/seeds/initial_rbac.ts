@@ -7,21 +7,30 @@
  * 1. The RBAC tables must exist (run migration 20260416000001_rbac_tables).
  * 2. The users table must already be populated (run initial_users seed first).
  */
-import type { Knex } from 'knex';
+// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import {
+  permissions,
+  rolePermissions,
+  roles,
+  tenants,
+  userTenantRoles,
+} from '../../../../common/compiled/node/services/db/schema.ts';
 
-export async function seed(knex: Knex): Promise<void> {
+// biome-ignore lint/suspicious/noExplicitAny: schema type not needed for seed scripts
+export async function seed(db: NodePgDatabase<any>): Promise<void> {
   // ── 1. Clean up in reverse FK order ────────────────────────────────────────
-  await knex('user_tenant_roles').del();
-  await knex('role_permissions').del();
-  await knex('roles').del();
-  await knex('permissions').del();
-  await knex('tenants').del();
+  await db.delete(userTenantRoles);
+  await db.delete(rolePermissions);
+  await db.delete(roles);
+  await db.delete(permissions);
+  await db.delete(tenants);
 
   // ── 2. Tenants ──────────────────────────────────────────────────────────────
-  await knex('tenants').insert([{ id: 1, name: 'Default', slug: 'default', is_active: true }]);
+  await db.insert(tenants).values([{ id: 1, name: 'Default', slug: 'default', is_active: true }]);
 
   // ── 3. Permissions ──────────────────────────────────────────────────────────
-  await knex('permissions').insert([
+  await db.insert(permissions).values([
     { id: 1, name: 'users:read', description: 'Read user records' },
     { id: 2, name: 'users:write', description: 'Create and update users' },
     { id: 3, name: 'reports:read', description: 'View reports' },
@@ -29,14 +38,14 @@ export async function seed(knex: Knex): Promise<void> {
   ]);
 
   // ── 4. Roles (scoped to tenant 1) ───────────────────────────────────────────
-  await knex('roles').insert([
+  await db.insert(roles).values([
     { id: 1, tenant_id: 1, name: 'TestGroup', description: 'Standard group role' },
     { id: 2, tenant_id: 1, name: 'TestGithub', description: 'GitHub SSO users' },
     { id: 3, tenant_id: 1, name: 'TestGmail', description: 'Gmail SSO users' },
   ]);
 
   // ── 5. Role → permission grants ─────────────────────────────────────────────
-  await knex('role_permissions').insert([
+  await db.insert(rolePermissions).values([
     { role_id: 1, permission_id: 1 },
     { role_id: 1, permission_id: 3 },
     { role_id: 2, permission_id: 1 },
@@ -46,7 +55,7 @@ export async function seed(knex: Knex): Promise<void> {
   ]);
 
   // ── 6. User → tenant → role assignments ────────────────────────────────────
-  await knex('user_tenant_roles').insert([
+  await db.insert(userTenantRoles).values([
     { user_id: 1, tenant_id: 1, role_id: 1 },
     { user_id: 2, tenant_id: 1, role_id: 2 },
     { user_id: 3, tenant_id: 1, role_id: 3 },
