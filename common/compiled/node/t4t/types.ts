@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express';
 // ─── Column definition loaded from YAML table config ─────────────────────────
 
 export interface ColDef {
+  label?: string;
   required?: boolean;
   multiKey?: boolean;
   auto?: string | false;
@@ -12,6 +13,19 @@ export interface ColDef {
   add?: boolean | string;
   hide?: 'omit' | 'blank';
   type?: string;
+  filter?: boolean;
+  sort?: boolean;
+  default?: unknown;
+  rules?: Record<string, unknown>;
+  comment?: string;
+  link?: {
+    display?: string;
+    text?: string;
+    keys?: string;
+    ctable?: string;
+    ckeys?: string;
+    [key: string]: unknown;
+  };
   ui?: {
     tag?: string;
     attrs?: {
@@ -31,10 +45,18 @@ export interface ColDef {
     text?: string;
     column?: string;
     joinFromTable?: string;
+    conn?: string;
+    parentCol?: string;
+    parentTableColName?: string;
+    childCol?: string;
+    limit?: number;
+    strict?: boolean;
+    display?: string;
+    [key: string]: unknown;
   };
 }
 
-// ─── Table definition built from YAML + middleware augmentation ───────────────
+// ─── Table definition built from config + middleware augmentation ─────────────
 
 export interface TableDef {
   name: string;
@@ -44,6 +66,9 @@ export interface TableDef {
   required: string[];
   auto: string[];
   cols: Record<string, ColDef>;
+  displayName?: string;
+  audit?: boolean | string;
+  multiSelect?: boolean;
   view: string | boolean;
   create: string | boolean;
   update: string | boolean;
@@ -55,7 +80,13 @@ export interface TableDef {
   deleteLimit: number;
   fileConfigUi: Record<string, unknown>;
   db: string;
+  /** Drizzle table reference object — set at startup from schema lookup. Used instead of raw string table name. */
+  ref?: unknown;
 }
+
+// ─── Config file shape (what the developer writes in .ts, before middleware enrichment) ──
+// Omits fields that generateTable derives at runtime.
+export type T4tTableConfig = Omit<TableDef, 'pk' | 'multiKey' | 'required' | 'auto' | 'fileConfigUi' | 'db'>;
 
 // ─── Relation metadata returned by mapRelation ────────────────────────────────
 
@@ -88,6 +119,9 @@ export interface FileUiConfig {
 
 export interface T4TOptions {
   authFunc?: (req: Request, res: Response, next: NextFunction) => void;
+  /** Drizzle schema object (e.g. `import * as schema from './database/schema.ts'`)
+   *  — used to look up table references for Drizzle queries. */
+  schema?: Record<string, unknown>;
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────

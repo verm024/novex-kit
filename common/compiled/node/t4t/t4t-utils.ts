@@ -129,6 +129,9 @@ export const kvDb2Col = (
   return _row;
 };
 
+/** Shared table reference map (tableName → Drizzle PgTable) set at startup from the passed schema. */
+export const tableRefMap: Record<string, unknown> = {};
+
 export const setAuditData = (
   req: Request,
   op: string,

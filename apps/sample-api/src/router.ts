@@ -3,6 +3,7 @@ import express from 'express';
 import * as auth from './auth/routes.ts';
 import base from './base/routes.ts';
 import categoriesRoute from './categories/routes.ts';
+import * as schema from './database/schema.ts';
 import fido from './fido/routes.ts';
 import iamUsersRoute from './iam-users/routes.ts';
 import rolesRoute from './roles/routes.ts';
@@ -47,7 +48,7 @@ export default ({ app }) => {
     router.use('/fido', fido),
   );
 
-  t4tRoutes({ app, routePrefix: '/api/t4t' }); // http://127.0.0.1:3000/api/t4t/
+  t4tRoutes({ app, routePrefix: '/api/t4t', schema }); // http://127.0.0.1:3000/api/t4t/
 
   // authentication stuff Below - you can remove if not needed (be aware of routing if you are customizing your auth)
   // routes used are: /api/auth (own auth rollout), /api/oauth, /api/oidc, /api/saml

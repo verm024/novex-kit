@@ -15,6 +15,14 @@ function mockAuthUser(req: Request, _res: Response, next: NextFunction): void {
 
 const router = express.Router();
 
-export default ({ app, routePrefix }: { app: Application; routePrefix: string }): void => {
-  app.use(routePrefix, router.use('/', t4t({ authFunc: mockAuthUser })));
+export default ({
+  app,
+  routePrefix,
+  schema,
+}: {
+  app: Application;
+  routePrefix: string;
+  schema?: Record<string, unknown>;
+}): void => {
+  app.use(routePrefix, router.use('/', t4t({ authFunc: mockAuthUser, schema })));
 };

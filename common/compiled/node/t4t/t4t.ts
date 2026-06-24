@@ -1,21 +1,18 @@
-// const path = require('path')
-import fs from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { eq, like, or } from 'drizzle-orm';
 import type { NextFunction, Response } from 'express';
 import express from 'express';
-import yaml from 'js-yaml';
 import multer from 'multer';
 import { memoryUpload } from '../express/upload.ts';
 import * as svc from '../services/index.ts';
 
-const { CONFIGS_FOLDER_PATH, CONFIGS_CSV_SIZE, CONFIGS_UPLOAD_SIZE, CUSTOM_PATH } = globalThis.__config?.T4T || {};
+const { CONFIGS_FOLDER_PATH, CONFIGS_CSV_SIZE, CONFIGS_UPLOAD_SIZE } = globalThis.__config?.T4T || {};
 
 import base from './t4t-base.ts';
-import { noAuthFunc, processJson, roleOperationMatch } from './t4t-utils.ts';
+import { noAuthFunc, processJson, roleOperationMatch, tableRefMap } from './t4t-utils.ts';
 import type { FileUiConfig, T4TOptions, T4TRequest } from './types.ts';
 
-const custom: Record<string, Record<string, (req: T4TRequest, res: Response) => Promise<void>>> = {};
-// const custom = CUSTOM_PATH ? (await import(CUSTOM_PATH)).default : { };
-// const custom = CUSTOM_PATH ? require(CUSTOM_PATH) : { }
 const uploadMemory = {
   limits: { files: 1, fileSize: Number(CONFIGS_CSV_SIZE) || 500000 },
 };
@@ -66,23 +63,23 @@ let orgIdKey = '';
 // __key is reserved property for identifying row in a table
 // | is reserved for seperating columns that make the multiKey
 const generateTable = async (req: T4TRequest, _res: Response, next: NextFunction): Promise<void> => {
-  // TODO get config info from a table
-  const tableKey = req.params.table; // 'books' // its the table name also
+  const tableKey = req.params.table as string;
 
-  // const docPath = path.resolve(new URL(".", import.meta.url).pathname, `./tables/${tableKey}.yaml`)
-  const docPath = `${CONFIGS_FOLDER_PATH}${tableKey}.yaml`;
-  const doc = yaml.load(fs.readFileSync(docPath, 'utf8'));
-  req.table = JSON.parse(JSON.stringify(doc));
+  const modPath = `${CONFIGS_FOLDER_PATH}${tableKey}.ts`;
+  const absPath = resolve(process.cwd(), modPath);
+  const mod = await import(pathToFileURL(absPath).href);
+  const doc = mod.default;
 
-  // generated items
+  req.table = doc;
+
   req.table.pk = '';
   req.table.multiKey = [];
   req.table.required = [];
   req.table.auto = [];
   req.table.fileConfigUi = {};
 
-  const { database, filename } = svc.get(req?.table?.conn)?.client?.config?.connection || {};
-  req.table.db = database || filename || 'DB Not Found';
+  req.table.ref = tableRefMap[req.table.name] ?? null;
+  req.table.db = 'drizzle1';
 
   // normalise roles — req.user.roles may be string[] (JWT) or comma-string (legacy)
   const userRoles = req.user?.[roleKey];
@@ -135,25 +132,46 @@ const routes = (options?: T4TOptions): express.Router => {
   idKey = 'sub';
   orgIdKey = 'tenant_id';
 
+  // Build shared table reference map from the Drizzle schema (if provided)
+  // Clear and repopulate so both t4t.ts and t4t-base.ts can access it
+  for (const k of Object.keys(tableRefMap)) delete tableRefMap[k];
+  if (options?.schema) {
+    for (const [key, val] of Object.entries(options.schema)) {
+      if (
+        val &&
+        typeof val === 'object' &&
+        (val as any)?.constructor?.[Symbol.for('drizzle:entityKind')] === 'PgTable'
+      ) {
+        tableRefMap[key] = val;
+      }
+    }
+  }
+
   return express
     .Router()
     .get('/healthcheck', (_req, res) => res.send('t4t ok - 0.0.1'))
     .get('/config/:table', authUser, generateTable, async (req, res) => {
       if (!(req as T4TRequest).table.view) throw new Error('Forbidden - Table Info');
-      res.json((req as T4TRequest).table); // return the table info...
+      const t4tReq = req as T4TRequest;
+      const { ref: _ref, ...config } = t4tReq.table;
+      res.json(config);
     })
     .post('/autocomplete/:table', authUser, generateTable, async (req, res) => {
       const t4tReq = req as T4TRequest;
       const { table } = t4tReq;
       const { key, text, search, parentTableColName, parentTableColVal, limit = 20 } = req.body;
-      // TODO use key to parentTable Col
+      const db = svc.get(table.conn) as any;
+      const ref = table.ref;
+      const conds = [like(ref[key], `%${search}%`), like(ref[text], `%${search}%`)];
+      if (parentTableColName && parentTableColVal !== undefined) {
+        conds.push(eq(ref[parentTableColName], parentTableColVal));
+      }
+      let rows = await db
+        .select()
+        .from(ref)
+        .where(or(...conds))
+        .limit(limit);
 
-      const query = svc
-        .get(table.conn)(table.name)
-        .where(key, 'like', `%${search}%`)
-        .orWhere(text, 'like', `%${search}%`);
-      if (parentTableColName && parentTableColVal !== undefined) query.andWhere(parentTableColName, parentTableColVal); // AND filter - OK
-      let rows = await query.clone().limit(limit); // TODO orderBy
       rows = rows.map(row => {
         const textKeys = text?.split(',');
         const texts: { type: string; value: unknown }[] = [];
@@ -174,40 +192,19 @@ const routes = (options?: T4TOptions): express.Router => {
       res.json(rows);
     })
     .get('/find/:table', authUser, generateTable, async (req, res) => {
-      // page is 1 based
-      const t4tReq = req as T4TRequest;
-      return custom[t4tReq?.table?.name]?.find ? custom[t4tReq.table.name].find(t4tReq, res) : base.find(t4tReq, res);
+      await base.find(req as T4TRequest, res);
     })
     .get('/find-one/:table', authUser, generateTable, async (req, res) => {
-      const t4tReq = req as T4TRequest;
-      return custom[t4tReq?.table?.name]?.findOne
-        ? custom[t4tReq.table.name].findOne(t4tReq, res)
-        : base.findOne(t4tReq, res);
+      await base.findOne(req as T4TRequest, res);
     })
-    .patch(
-      '/update/:table{/:id}',
-      authUser,
-      generateTable,
-      storageUpload().any(), // TODO what about multiple files? also need to find the column involved...
-      processJson,
-      async (req, res) => {
-        const t4tReq = req as T4TRequest;
-        return custom[t4tReq?.table?.name]?.update
-          ? custom[t4tReq.table.name].update(t4tReq, res)
-          : base.update(t4tReq, res);
-      },
-    )
+    .patch('/update/:table{/:id}', authUser, generateTable, storageUpload().any(), processJson, async (req, res) => {
+      await base.update(req as T4TRequest, res);
+    })
     .post('/create/:table', authUser, generateTable, storageUpload().any(), processJson, async (req, res) => {
-      const t4tReq = req as T4TRequest;
-      return custom[t4tReq?.table?.name]?.create
-        ? custom[t4tReq.table.name].create(t4tReq, res)
-        : base.create(t4tReq, res);
+      await base.create(req as T4TRequest, res);
     })
     .post('/remove/:table', authUser, generateTable, async (req, res) => {
-      const t4tReq = req as T4TRequest;
-      return custom[t4tReq?.table?.name]?.remove
-        ? custom[t4tReq.table.name].remove(t4tReq, res)
-        : base.remove(t4tReq, res);
+      await base.remove(req as T4TRequest, res);
     })
     .post(
       '/upload/:table',
@@ -215,10 +212,7 @@ const routes = (options?: T4TOptions): express.Router => {
       generateTable,
       memoryUpload(uploadMemory).single('csv-file'),
       async (req, res) => {
-        const t4tReq = req as T4TRequest;
-        return custom[t4tReq?.table?.name]?.upload
-          ? custom[t4tReq?.table?.name]?.upload(t4tReq, res)
-          : base.upload(t4tReq, res);
+        await base.upload(req as T4TRequest, res);
       },
     );
 
