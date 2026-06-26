@@ -88,6 +88,24 @@ export interface TableDef {
 // Omits fields that generateTable derives at runtime.
 export type T4tTableConfig = Omit<TableDef, 'pk' | 'multiKey' | 'required' | 'auto' | 'fileConfigUi' | 'db'>;
 
+// ─── Supplement config shape (Phase 2 — developer writes this, schema fills the rest)
+// Omits everything the Drizzle schema can introspect: column types, required, auto, PK, FKs.
+// The developer only supplies labels, permissions, UI config, and non-derivable options.
+export interface T4tSupplement {
+  displayName?: string;
+  view?: string | boolean;
+  create?: string | boolean;
+  update?: string | boolean;
+  delete?: string | boolean;
+  import?: string | boolean;
+  export?: string | boolean;
+  deleteLimit?: number;
+  multiSelect?: boolean;
+  audit?: boolean | string;
+  defaultSort?: unknown[];
+  cols?: Record<string, ColDef>;
+}
+
 // ─── Relation metadata returned by mapRelation ────────────────────────────────
 
 export interface RelationDef {
@@ -119,9 +137,10 @@ export interface FileUiConfig {
 
 export interface T4TOptions {
   authFunc?: (req: Request, res: Response, next: NextFunction) => void;
-  /** Drizzle schema object (e.g. `import * as schema from './database/schema.ts'`)
-   *  — used to look up table references for Drizzle queries. */
-  schema?: Record<string, unknown>;
+  /** Drizzle schema object(s) (e.g. `import * as schema from './database/schema.ts'`)
+   *  — used to look up table references for Drizzle queries.
+   *  Accepts a single schema or an array of schemas (for multi-schema setups like IAM, audit). */
+  schema?: Record<string, unknown> | Record<string, unknown>[];
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────

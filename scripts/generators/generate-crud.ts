@@ -71,42 +71,7 @@ Usage: node scripts/generators/generate-crud.ts \\
   process.exit(1);
 }
 
-// ─── Drizzle internals (symbol-based — works across module instances) ─────────
-
-/** Symbol used by drizzle-orm to tag the entity kind on a table constructor (e.g. `'PgTable'`). */
-const ENTITY_KIND = Symbol.for('drizzle:entityKind');
-
-/** Symbol under which drizzle-orm stores the column map on a table instance. */
-const TABLE_COLUMNS = Symbol.for('drizzle:Columns');
-
-/**
- * Returns `true` when `obj` is a drizzle-orm `PgTable` instance.
- *
- * We use `Symbol.for('drizzle:entityKind')` on the constructor rather than
- * `instanceof PgTable` because the schema file is imported via a dynamic
- * `import()` URL, which may resolve to a different module instance than the
- * one loaded by this script — making `instanceof` unreliable across ESM boundaries.
- *
- * @param obj - The value to test.
- */
-function isPgTable(obj: unknown): boolean {
-  // entityKind is a static property on the constructor, not on the instance
-  // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
-  return typeof obj === 'object' && obj !== null && (obj as any)?.constructor?.[ENTITY_KIND] === 'PgTable';
-}
-
-/**
- * Returns the column map for a drizzle-orm table.
- * The map is keyed by column variable name and the values are drizzle column objects.
- *
- * @param table - A drizzle-orm `PgTable` instance.
- * @returns A record mapping column name to the drizzle column descriptor.
- */
-// biome-ignore lint/suspicious/noExplicitAny: drizzle internals are untyped here
-function getColumns(table: object): Record<string, any> {
-  // biome-ignore lint/suspicious/noExplicitAny: drizzle internals
-  return (table as any)[TABLE_COLUMNS] ?? {};
-}
+import { getColumns, isPgTable } from '../../common/compiled/node/services/db/introspect.ts';
 
 // ─── SQL type → Zod code mapping ─────────────────────────────────────────────
 

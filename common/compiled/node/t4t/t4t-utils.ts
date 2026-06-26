@@ -86,7 +86,7 @@ export const formUniqueKey = (table: TableDef, args: string): Record<string, unk
 };
 
 export const mapRelation = (_key: string, col: ColDef): RelationDef | null => {
-  // foreignKey get from yaml config, so make sure there is foreignKey
+  // foreignKey retrieved from Drizzle schema FK introspection
   const table1Id = col?.options?.foreignKey;
   const table2 = col?.options?.tableName;
   const table2Id = col?.options?.key;

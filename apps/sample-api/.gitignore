@@ -15,6 +15,7 @@ src/*/generated/*
 src/*/schema.js
 src/*/controller.ts
 src/*/routes.ts
+src/*/t4t-supplement.ts
 
 # Keep categories (public schema) + selected IAM tables as committed examples
 # categories — simple CRUD, public schema
@@ -26,6 +27,7 @@ src/*/routes.ts
 !src/categories/schema.js
 !src/categories/controller.ts
 !src/categories/routes.ts
+!src/categories/t4t-supplement.ts
 !src/iam-users/generated/schema.js
 !src/iam-users/generated/routes.ts
 !src/iam-users/generated/controller.ts

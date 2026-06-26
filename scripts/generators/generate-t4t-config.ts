@@ -14,50 +14,10 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { getColumns, isPgTable } from '../../common/compiled/node/services/db/introspect.ts';
 
-const ENTITY_KIND = Symbol.for('drizzle:entityKind');
-const TABLE_COLUMNS = Symbol.for('drizzle:Columns');
-
-function isPgTable(obj: unknown): boolean {
-  return typeof obj === 'object' && obj !== null && (obj as any)?.constructor?.[ENTITY_KIND] === 'PgTable';
-}
-
-// biome-ignore lint/suspicious/noExplicitAny: drizzle internals
-function getColumns(table: object): Record<string, any> {
-  return (table as any)[TABLE_COLUMNS] ?? {};
-}
-
-function sqlTypeToT4t(sqlType: string): string {
-  const base = sqlType.toLowerCase().split('(')[0].split(' ')[0].trim();
-  switch (base) {
-    case 'serial':
-    case 'bigserial':
-    case 'integer':
-    case 'int':
-    case 'int2':
-    case 'int4':
-    case 'int8':
-    case 'bigint':
-      return 'integer';
-    case 'numeric':
-    case 'decimal':
-      return 'decimal';
-    case 'boolean':
-    case 'bool':
-      return 'boolean';
-    case 'timestamp':
-    case 'timestamptz':
-      return 'datetime';
-    case 'date':
-      return 'date';
-    case 'time':
-      return 'time';
-    case 'jsonb':
-    case 'json':
-      return 'string';
-    default:
-      return 'string';
-  }
+function toKebabCase(str: string): string {
+  return str.replace(/([A-Z])/g, m => `-${m.toLowerCase()}`).replace(/^-/, '');
 }
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -96,19 +56,18 @@ console.log(`\nGenerating T4T configs from: ${schemaFilePath}`);
 console.log(`App root:                    ${appRoot}\n`);
 
 const schemaExports = await import(pathToFileURL(schemaPath).href);
-const t4tDir = resolve(appRoot, 'src', 't4t-config');
 const generated: string[] = [];
 
 for (const [varName, exported] of Object.entries(schemaExports)) {
   if (!isPgTable(exported)) continue;
   if (tablesFilter && !tablesFilter.includes(varName)) continue;
 
+  const kebab = toKebabCase(varName);
+  const t4tDir = resolve(appRoot, 'src', kebab);
+
   // biome-ignore lint/suspicious/noExplicitAny: drizzle internals
   const columns = getColumns(exported as any);
 
-  // Determine table name used in the DB (first arg to pgTable)
-  // biome-ignore lint/suspicious/noExplicitAny: drizzle internals
-  const dbTableName: string = (exported as any).constructor?.name || varName;
   const displayName =
     varName.charAt(0).toUpperCase() +
     varName
@@ -116,32 +75,28 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
       .replace(/([A-Z])/g, ' $1')
       .trim();
 
+  // Check for FK references to determine if `text` hint is needed
+  // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+  const tableConfig = (exported as any).config;
+  const fkCols = new Set<string>();
+  if (tableConfig?.foreignKeys) {
+    for (const fk of tableConfig.foreignKeys) {
+      if (!fk.columns?.length) continue;
+      for (const localCol of fk.columns) {
+        const name = Object.entries(columns).find(([, c]) => c === localCol)?.[0];
+        if (name) fkCols.add(name);
+      }
+    }
+  }
+
   const cols: string[] = [];
   for (const [colName, col] of Object.entries(columns)) {
     // biome-ignore lint/suspicious/noExplicitAny: drizzle column internals
     const c = col as any;
-    const sqlType: string = c.getSQLType?.() ?? 'string';
-    const t4tType = sqlTypeToT4t(sqlType);
     const isPk: boolean = c.primary ?? false;
-    const notNull: boolean = c.notNull ?? false;
-    const hasDefault: boolean = c.hasDefault ?? false;
-    const isSerial: boolean = ['serial', 'bigserial'].includes(sqlType.toLowerCase().split('(')[0].trim());
-
-    // Check for FK references via drizzle table config
-    // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
-    const tableConfig = (exported as any).config;
-    let fkInfo: string | null = null;
-    if (tableConfig?.foreignKeys) {
-      for (const fk of tableConfig.foreignKeys) {
-        // biome-ignore lint/suspicious/noExplicitAny: drizzle FK internals
-        if (fk.columns?.includes(c)) {
-          // biome-ignore lint/suspicious/noExplicitAny: drizzle FK internals
-          const refTableName = fk.reference?.()?.name || fk.foreignTable?.constructor?.name || '';
-          const refColName = colName; // same name is most common
-          fkInfo = `options: { conn: '${connName}', tableName: '${refTableName}', key: 'id', text: 'name' }`;
-        }
-      }
-    }
+    const isSerial: boolean = ['serial', 'bigserial'].includes(
+      (c.getSQLType?.() ?? '').toLowerCase().split('(')[0].trim(),
+    );
 
     const label =
       colName.charAt(0).toUpperCase() +
@@ -151,29 +106,28 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
         .trim();
     const items: string[] = [];
     items.push(`label: '${label}'`);
-    if (isPk || isSerial) items.push("auto: 'pk'");
-    if (isPk) items.push("edit: 'readonly'");
-    else if (isSerial) items.push("edit: 'readonly'");
+    if (isPk || isSerial) items.push("edit: 'readonly'");
     else {
-      items.push("type: '" + t4tType + "'");
-      if (notNull && !hasDefault) items.push('required: true');
       items.push('add: true');
       items.push('edit: true');
       items.push('filter: true');
-      if (t4tType === 'string' && !isPk) items.push("ui: { tag: 'input' }");
+      if (fkCols.has(colName)) {
+        items.push("options: { text: 'name' }");
+      }
     }
-    if (fkInfo) items.push(fkInfo);
 
     cols.push(`    ${colName}: { ${items.join(', ')} }`);
   }
 
   const colLines = cols.join(',\n');
 
-  const content = `import type { T4tTableConfig } from '@common/node/t4t/types';
+  const content = `// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-GENERATED SCAFFOLD — edit freely. Will NOT be overwritten on re-run.
+// Adjust labels, permissions, UI tags, and FK display columns as needed.
+// ─────────────────────────────────────────────────────────────────────────────
+import type { T4tSupplement } from '@common/node/t4t/types';
 
 export default {
-  name: '${varName}',
-  conn: '${connName}',
   displayName: '${displayName}',
   view: 'admin,editor,viewer',
   create: 'admin',
@@ -186,25 +140,25 @@ export default {
   cols: {
 ${colLines},
   },
-} satisfies T4tTableConfig;
+} satisfies T4tSupplement;
 `;
 
-  const filePath = resolve(t4tDir, `${varName}.ts`);
+  const filePath = resolve(t4tDir, 't4t-supplement.ts');
   mkdirSync(t4tDir, { recursive: true });
 
   if (existsSync(filePath)) {
-    console.log(`  ${varName}.ts — already exists, skipped`);
+    console.log(`  ${kebab}/t4t-supplement.ts — already exists, skipped`);
     continue;
   }
 
   writeFileSync(filePath, content, 'utf8');
   generated.push(varName);
-  console.log(`  ${varName}.ts — created`);
+  console.log(`  ${kebab}/t4t-supplement.ts — created`);
 }
 
 if (generated.length === 0) {
   console.log('No tables generated (all configs already exist or no pgTable exports found).');
 } else {
-  console.log(`\nGenerated ${generated.length} config(s) in src/t4t-config/`);
+  console.log(`\nGenerated ${generated.length} supplement(s) in src/<table>/t4t-supplement.ts`);
   console.log('Review and edit: labels, permissions, UI tags, FK text columns.\n');
 }

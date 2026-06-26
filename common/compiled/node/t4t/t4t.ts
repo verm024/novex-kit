@@ -10,8 +10,9 @@ import * as svc from '../services/index.ts';
 const { CONFIGS_FOLDER_PATH, CONFIGS_CSV_SIZE, CONFIGS_UPLOAD_SIZE } = globalThis.__config?.T4T || {};
 
 import base from './t4t-base.ts';
+import { mergeWithSupplement, toKebabCase } from './t4t-schema.ts';
 import { noAuthFunc, processJson, roleOperationMatch, tableRefMap } from './t4t-utils.ts';
-import type { FileUiConfig, T4TOptions, T4TRequest } from './types.ts';
+import type { FileUiConfig, T4TOptions, T4TRequest, T4tSupplement } from './types.ts';
 
 const uploadMemory = {
   limits: { files: 1, fileSize: Number(CONFIGS_CSV_SIZE) || 500000 },
@@ -65,20 +66,30 @@ let orgIdKey = '';
 const generateTable = async (req: T4TRequest, _res: Response, next: NextFunction): Promise<void> => {
   const tableKey = req.params.table as string;
 
-  const modPath = `${CONFIGS_FOLDER_PATH}${tableKey}.ts`;
-  const absPath = resolve(process.cwd(), modPath);
-  const mod = await import(pathToFileURL(absPath).href);
-  const doc = mod.default;
+  // Resolve Drizzle table reference from schema
+  let drizzleTable = tableRefMap[tableKey] ?? null;
+  if (!drizzleTable) {
+    const normalized = tableKey.replace(/[_-]/g, '').toLowerCase();
+    const match = Object.keys(tableRefMap).find(k => k.replace(/[_-]/g, '').toLowerCase() === normalized);
+    if (match) drizzleTable = tableRefMap[match];
+  }
 
-  req.table = doc;
+  // Load supplement config from src/<kebab-name>/t4t-supplement.ts
+  let supplement: T4tSupplement = {};
+  try {
+    const kebab = toKebabCase(tableKey);
+    const baseDir = CONFIGS_FOLDER_PATH || './src/';
+    const modPath = `${baseDir}${kebab}/t4t-supplement.ts`;
+    const absPath = resolve(process.cwd(), modPath);
+    const mod = await import(pathToFileURL(absPath).href);
+    supplement = (mod.default ?? {}) as T4tSupplement;
+  } catch {
+    // No supplement file — use schema-only defaults
+  }
 
-  req.table.pk = '';
-  req.table.multiKey = [];
-  req.table.required = [];
-  req.table.auto = [];
-  req.table.fileConfigUi = {};
-
-  req.table.ref = tableRefMap[req.table.name] ?? null;
+  // Merge schema introspection + supplement into full TableDef
+  req.table = mergeWithSupplement(tableKey, drizzleTable, supplement);
+  req.table.ref = drizzleTable;
   req.table.db = 'drizzle1';
 
   // normalise roles — req.user.roles may be string[] (JWT) or comma-string (legacy)
@@ -102,19 +113,10 @@ const generateTable = async (req: T4TRequest, _res: Response, next: NextFunction
   // sanitize
   req.table.deleteLimit = Number(req.table.deleteLimit) || -1;
 
-  // can return for autocomplete... req.path
+  // field-level permission enrichment
   const cols = req.table.cols;
   for (const key in cols) {
     const col = cols[key];
-    if (col.auto) {
-      if (col.auto === 'pk') {
-        req.table.pk = key;
-      } else {
-        req.table.auto.push(key);
-      }
-    }
-    if (col.multiKey) req.table.multiKey.push(key);
-    if (col.required) req.table.required.push(key);
     if (col?.ui?.tag === 'files') req.table.fileConfigUi[key] = col?.ui;
 
     col.editor = !(col.editor && !roleOperationMatch(roleStr, col.editor, key));
@@ -132,11 +134,12 @@ const routes = (options?: T4TOptions): express.Router => {
   idKey = 'sub';
   orgIdKey = 'tenant_id';
 
-  // Build shared table reference map from the Drizzle schema (if provided)
+  // Build shared table reference map from all Drizzle schemas (if provided)
   // Clear and repopulate so both t4t.ts and t4t-base.ts can access it
   for (const k of Object.keys(tableRefMap)) delete tableRefMap[k];
-  if (options?.schema) {
-    for (const [key, val] of Object.entries(options.schema)) {
+  const schemas = Array.isArray(options?.schema) ? options.schema : [options?.schema].filter(Boolean);
+  for (const schema of schemas) {
+    for (const [key, val] of Object.entries(schema)) {
       if (
         val &&
         typeof val === 'object' &&
