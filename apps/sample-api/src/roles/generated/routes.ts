@@ -4,22 +4,35 @@
 // Source table: roles
 // ─────────────────────────────────────────────────────────────────────────────
 import { authUser } from '@common/node/auth/jwt';
+import { requireRole } from '@common/node/auth/permit';
 import { validate } from '@common/node/errors/validate';
 import express from 'express';
+import { memoryUpload } from '@common/node/express/upload';
+import supplement from '../t4t-supplement.ts';
+import {
+  RolesBodySchema,
+  RolesParamsSchema,
+  RolesQuerySchema,
+  RolesUpdateSchema,
+} from './schema.js';
 // Imports from the sidecar controller so developer overrides are picked up automatically.
 import rolesController from '../controller.ts';
-import { RolesBodySchema, RolesParamsSchema, RolesQuerySchema, RolesUpdateSchema } from './schema.js';
 
 export default express
   .Router()
-  .post('/', authUser, validate('body', RolesBodySchema), rolesController.create)
-  .get('/', authUser, validate('query', RolesQuerySchema), rolesController.find)
-  .get('/:id', authUser, validate('params', RolesParamsSchema), rolesController.findOne)
+  .get('/config', authUser, rolesController.getConfig)
+  .post('/delete', authUser, requireRole(supplement, 'delete'), rolesController.removeBatch)
+  .post('/upload', authUser, requireRole(supplement, 'import'), memoryUpload().single('file'), rolesController.upload)
+  .post('/autocomplete', authUser, requireRole(supplement, 'view'), rolesController.autocomplete)
+  .post('/', authUser, requireRole(supplement, 'create'), validate('body', RolesBodySchema), rolesController.create)
+  .get('/', authUser, requireRole(supplement, 'view'), validate('query', RolesQuerySchema), rolesController.find)
+  .get('/:id', authUser, requireRole(supplement, 'view'), validate('params', RolesParamsSchema), rolesController.findOne)
   .patch(
     '/:id',
     authUser,
+    requireRole(supplement, 'update'),
     validate('params', RolesParamsSchema),
     validate('body', RolesUpdateSchema),
     rolesController.update,
   )
-  .delete('/:id', authUser, validate('params', RolesParamsSchema), rolesController.remove);
+  .delete('/:id', authUser, requireRole(supplement, 'delete'), validate('params', RolesParamsSchema), rolesController.remove);

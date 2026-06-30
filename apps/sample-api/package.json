@@ -37,6 +37,7 @@
     "generate:t4t:iam": "node ../../scripts/generators/generate-t4t-config.ts --schema ./src/database/schema-iam.ts --app .",
     "generate:t4t:audit": "node ../../scripts/generators/generate-t4t-config.ts --schema ./src/database/schema-audit.ts --app .",
     "generate:t4t:all": "npm run generate:t4t && npm run generate:t4t:iam && npm run generate:t4t:audit",
+    "generate:all": "npm run generate:crud:all && npm run generate:t4t:all",
     "docs:generate": "node ../../scripts/generators/generate-openapi.ts --src ./src --out ./docs/openapi/openapi.yaml --prefix /api/sample-api --title \"Sample API\" --version 1.0.0",
     "test:schema": "node ../../scripts/test-schemas.ts ./schemas",
     "test": "npm run test:unit && npm run test:integration && npm run test:schema",

@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import type { NextFunction, Request, Response } from 'express';
 import type { AuditData, ColDef, InvalidInputResult, RelationDef, T4TRequest, TableDef } from './types.ts';
 
@@ -149,3 +150,68 @@ export const setAuditData = (
   prev_values: '', // TODO
   new_values: typeof body === 'object' ? JSON.stringify(Object.values(body), null, 2) : body.toString(),
 });
+
+// ─── FK join utilities (consumed by generated CRUD controllers) ──────────────
+
+export interface FkConfig {
+  col: string;
+  ref: string;
+  pk: string;
+  text: string;
+}
+
+export function buildFkSelectFields(fkConfig: FkConfig[]): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const fk of fkConfig) {
+    const ref = tableRefMap?.[fk.ref] as any;
+    if (!ref) continue;
+    fields[`${fk.col}_${fk.text}`] = ref[fk.text];
+  }
+  return fields;
+}
+
+export function addFkJoins(
+  query: any,
+  fkConfig: FkConfig[],
+  table: any,
+): { query: any; joinCols: Record<string, string>; hasJoins: boolean } {
+  let q = query;
+  const joinCols: Record<string, string> = {};
+  let hasJoins = false;
+  for (const fk of fkConfig) {
+    const ref = tableRefMap?.[fk.ref] as any;
+    if (!ref) continue;
+    q = q.leftJoin(ref, eq(table[fk.col], ref[fk.pk]));
+    joinCols[fk.col] = `${fk.col}_${fk.text}`;
+    hasJoins = true;
+  }
+  return { query: q, joinCols, hasJoins };
+}
+
+export function transformFkDisplay(
+  rows: Record<string, unknown>[],
+  joinCols: Record<string, string>,
+): Record<string, unknown>[] {
+  return rows.map(row => {
+    for (const [col, alias] of Object.entries(joinCols)) {
+      if (row[alias] !== undefined) {
+        row[col] = { key: row[col], text: row[alias] };
+        delete row[alias];
+      }
+    }
+    return row;
+  });
+}
+
+export function transformFkDisplayOne(
+  row: Record<string, unknown>,
+  joinCols: Record<string, string>,
+): Record<string, unknown> {
+  for (const [col, alias] of Object.entries(joinCols)) {
+    if (row[alias] !== undefined) {
+      row[col] = { key: row[col], text: row[alias] };
+      delete row[alias];
+    }
+  }
+  return row;
+}

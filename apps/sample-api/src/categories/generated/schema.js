@@ -9,7 +9,7 @@ import { z } from 'zod';
 export const CategoriesBodySchema = z
   .object({
     name: z.string(),
-    description: z.string().optional(),
+    description: z.string().nullish(),
   })
   .meta({ id: 'CategoriesBody' });
 
@@ -26,9 +26,10 @@ export const CategoriesParamsSchema = z
 // Query params — pagination for GET /categories
 export const CategoriesQuerySchema = z
   .object({
-    limit: z.coerce.number().int().positive().max(100).default(10).meta({ example: 10 }),
-    page: z.coerce.number().int().min(0).default(0).meta({ example: 0 }),
+    limit: z.coerce.number().int().positive().max(100).default(25).meta({ example: 25 }),
+    page: z.coerce.number().int().min(1).default(1).meta({ example: 1 }),
   })
+  .passthrough()
   .meta({ id: 'CategoriesQuery' });
 
 // Full row as returned by SELECT — columns in excludeFromResponse are omitted

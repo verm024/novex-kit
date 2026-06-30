@@ -8,16 +8,16 @@ import { z } from 'zod';
 // Insert body — fields accepted on POST /users
 export const UsersBodySchema = z
   .object({
-    roles: z.string().optional(),
-    tenant_id: z.number().int().optional(),
-    username: z.string().optional(),
+    roles: z.string().nullish(),
+    tenant_id: z.preprocess(v => v === '' ? undefined : Number(v), z.number().int().nullish()),
+    username: z.string().nullish(),
     email: z.string(),
-    githubId: z.number().int().optional(),
-    role: z.string().optional(),
-    pnToken: z.string().optional(),
-    sms: z.string().optional(),
-    telegramId: z.string().optional(),
-    telegramUsername: z.string().optional(),
+    githubId: z.preprocess(v => v === '' ? undefined : Number(v), z.number().int().nullish()),
+    role: z.string().nullish(),
+    pnToken: z.string().nullish(),
+    sms: z.string().nullish(),
+    telegramId: z.string().nullish(),
+    telegramUsername: z.string().nullish(),
   })
   .meta({ id: 'UsersBody' });
 
@@ -34,9 +34,10 @@ export const UsersParamsSchema = z
 // Query params — pagination for GET /users
 export const UsersQuerySchema = z
   .object({
-    limit: z.coerce.number().int().positive().max(100).default(10).meta({ example: 10 }),
-    page: z.coerce.number().int().min(0).default(0).meta({ example: 0 }),
+    limit: z.coerce.number().int().positive().max(100).default(25).meta({ example: 25 }),
+    page: z.coerce.number().int().min(1).default(1).meta({ example: 1 }),
   })
+  .passthrough()
   .meta({ id: 'UsersQuery' });
 
 // Full row as returned by SELECT — columns in excludeFromResponse are omitted

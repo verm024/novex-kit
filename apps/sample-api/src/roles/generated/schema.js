@@ -26,8 +26,8 @@ export const RolesParamsSchema = z
 // Query params — pagination for GET /roles
 export const RolesQuerySchema = z
   .object({
-    limit: z.coerce.number().int().positive().max(100).default(10).meta({ example: 10 }),
-    page: z.coerce.number().int().min(0).default(0).meta({ example: 0 }),
+    limit: z.coerce.number().int().positive().max(100).default(25).meta({ example: 25 }),
+    page: z.coerce.number().int().min(1).default(1).meta({ example: 1 }),
   })
   .meta({ id: 'RolesQuery' });
 

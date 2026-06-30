@@ -252,6 +252,8 @@ interface BodyField {
    * `false` when the column is nullable or has a default (optional in POST body).
    */
   required: boolean;
+  /** Raw SQL type (e.g. 'timestamp', 'varchar', 'integer') for type-aware preprocess. */
+  sqlType: string;
 }
 
 /**
@@ -267,6 +269,13 @@ interface ResponseField {
   nullable: boolean;
 }
 
+interface FkJoinInfo {
+  colName: string;
+  refVar: string;
+  refPkCol: string;
+  refTextCol: string;
+}
+
 /**
  * Aggregates all per-table metadata needed by the code generators.
  * Constructed once per table in the main loop and passed to every `generate*` function.
@@ -278,8 +287,12 @@ interface TableInfo {
   pascalName: string;
   /** Kebab-case stem used for file names and URL segments, e.g. `'fga-config'`. */
   kebabName: string;
-  /** Name of the primary key column, e.g. `'id'` or `'code'`. */
+  /** Name of the primary key column, e.g. `'id'` or `'code'`. For composite PK this is `'__key'`. */
   pkColName: string;
+  /** All PK column names — length 1 for single PK, >1 for composite PK. */
+  pkColNames: string[];
+  /** `true` when the table has multiple PK columns (composite primary key). */
+  isCompositePk: boolean;
   /**
    * `true` when the primary key is a numeric type (`serial`, `integer`, etc.).
    * Controls whether generated param schemas use `z.coerce.number()` or `z.string()`.
@@ -305,6 +318,8 @@ interface TableInfo {
    * Sourced from `generate-crud.config.json → tables.<name>.excludeFromResponse`.
    */
   excludeFromResponse: string[];
+  /** FK join metadata derived from schema FK constraints + supplement options.text. */
+  fkJoins: FkJoinInfo[];
 }
 
 // ─── Code generators ─────────────────────────────────────────────────────────
@@ -339,12 +354,41 @@ const AUTO_HEADER = (varName: string) => `\
  * @returns The full file content as a UTF-8 string ready to be written to disk.
  */
 function generateSchemaFile(info: TableInfo): string {
-  const { varName, pascalName, kebabName, pkColName, pkIsNumeric, bodyFields, responseFields } = info;
+  const {
+    varName,
+    pascalName,
+    kebabName,
+    pkColName,
+    pkIsNumeric,
+    pkColNames,
+    isCompositePk,
+    bodyFields,
+    responseFields,
+  } = info;
 
   const pkZodCode = pkIsNumeric ? 'z.coerce.number().int().positive()' : 'z.string().min(1)';
   const pkExample = pkIsNumeric ? '1' : "'example-id'";
 
-  const bodyLines = bodyFields.map(f => `    ${f.name}: ${f.zodCode}${f.required ? '' : '.optional()'},`).join('\n');
+  // Frontend sends empty string for unfilled numeric/date/time fields;
+  // preprocess converts '' to undefined so Zod never sees it and the field
+  // either becomes optional (omitted from body) or fails required validation.
+  const preprocessable = (code: string, type: string): string | null => {
+    const baseType = type.toLowerCase().split('(')[0].split(' ')[0].trim();
+    if (code.startsWith('z.number()')) return 'Number(v)';
+    if (['timestamp', 'date', 'time'].includes(baseType)) return 'v';
+    return null;
+  };
+  const bodyLines = bodyFields
+    .map(f => {
+      // optional fields also accept null (frontend sends null for untouched form fields)
+      const innerCode = f.required ? f.zodCode : `${f.zodCode}.nullish()`;
+      const transform = preprocessable(f.zodCode, f.sqlType);
+      if (transform) {
+        return `    ${f.name}: z.preprocess(v => v === '' ? undefined : ${transform}, ${innerCode}),`;
+      }
+      return `    ${f.name}: ${innerCode},`;
+    })
+    .join('\n');
   const responseLines = responseFields
     .map(f => `    ${f.name}: ${f.zodCode}${f.nullable ? '.nullable()' : ''},`)
     .join('\n');
@@ -364,16 +408,17 @@ export const ${pascalName}UpdateSchema = ${pascalName}BodySchema.partial().meta(
 // URL params — :${pkColName} on /:${pkColName} routes
 export const ${pascalName}ParamsSchema = z
   .object({
-    ${pkColName}: ${pkZodCode}.meta({ example: ${pkExample} }),
+    ${isCompositePk ? `__key: z.string().min(1).meta({ example: '${pkColNames.join('|')}' })` : `${pkColName}: ${pkZodCode}.meta({ example: ${pkExample} })`},
   })
   .meta({ id: '${pascalName}Params' });
 
 // Query params — pagination for GET /${kebabName}
 export const ${pascalName}QuerySchema = z
   .object({
-    limit: z.coerce.number().int().positive().max(100).default(10).meta({ example: 10 }),
-    page: z.coerce.number().int().min(0).default(0).meta({ example: 0 }),
+    limit: z.coerce.number().int().positive().max(100).default(25).meta({ example: 25 }),
+    page: z.coerce.number().int().min(1).default(1).meta({ example: 1 }),
   })
+  .passthrough()
   .meta({ id: '${pascalName}Query' });
 
 // Full row as returned by SELECT — columns in excludeFromResponse are omitted
@@ -404,11 +449,21 @@ ${responseLines}
  * @returns The full file content as a UTF-8 string ready to be written to disk.
  */
 function generateRouteFile(info: TableInfo): string {
-  const { varName, pascalName, kebabName, pkColName } = info;
+  const { varName, pascalName, kebabName, pkColName, isCompositePk } = info;
+  const routePkParam = isCompositePk ? '__key' : pkColName;
 
-  return `${AUTO_HEADER(varName)}import { authUser } from '@common/node/auth/jwt';
+  return `${AUTO_HEADER(varName)}import { authUser as realAuth } from '@common/node/auth/jwt';
+import { requireRole } from '@common/node/auth/permit';
+
+// biome-ignore lint/suspicious/noExplicitAny: mock auth for development (same as T4T's index.ts)
+const authUser = process.env.NODE_ENV === 'production' ? realAuth : (req: any, _res: any, next: any) => {
+  req.user = { sub: 'testuser', roles: ['admin', 'editor', 'viewer'] };
+  next();
+};
 import { validate } from '@common/node/errors/validate';
 import express from 'express';
+import { memoryUpload } from '@common/node/express/upload';
+import supplement from '../t4t-supplement.ts';
 import {
   ${pascalName}BodySchema,
   ${pascalName}ParamsSchema,
@@ -420,17 +475,22 @@ import ${varName}Controller from '../controller.ts';
 
 export default express
   .Router()
-  .post('/', authUser, validate('body', ${pascalName}BodySchema), ${varName}Controller.create)
-  .get('/', authUser, validate('query', ${pascalName}QuerySchema), ${varName}Controller.find)
-  .get('/:${pkColName}', authUser, validate('params', ${pascalName}ParamsSchema), ${varName}Controller.findOne)
+  .get('/config', authUser, ${varName}Controller.getConfig)
+  .post('/delete', authUser, requireRole(supplement, 'delete'), ${varName}Controller.removeBatch)
+  .post('/upload', authUser, requireRole(supplement, 'import'), memoryUpload().single('file'), ${varName}Controller.upload)
+  .post('/autocomplete', authUser, requireRole(supplement, 'view'), ${varName}Controller.autocomplete)
+  .post('/', authUser, requireRole(supplement, 'create'), validate('body', ${pascalName}BodySchema), ${varName}Controller.create)
+  .get('/', authUser, requireRole(supplement, 'view'), validate('query', ${pascalName}QuerySchema), ${varName}Controller.find)
+  .get('/:${routePkParam}', authUser, requireRole(supplement, 'view'), validate('params', ${pascalName}ParamsSchema), ${varName}Controller.findOne)
   .patch(
-    '/:${pkColName}',
+    '/:${routePkParam}',
     authUser,
+    requireRole(supplement, 'update'),
     validate('params', ${pascalName}ParamsSchema),
     validate('body', ${pascalName}UpdateSchema),
     ${varName}Controller.update,
   )
-  .delete('/:${pkColName}', authUser, validate('params', ${pascalName}ParamsSchema), ${varName}Controller.remove);
+  .delete('/:${routePkParam}', authUser, requireRole(supplement, 'delete'), validate('params', ${pascalName}ParamsSchema), ${varName}Controller.remove);
 `;
 }
 
@@ -451,19 +511,75 @@ export default express
  * @returns The full file content as a UTF-8 string ready to be written to disk.
  */
 function generateControllerFile(info: TableInfo): string {
-  const { varName, pkColName, pkIsNumeric, allColNames, excludeFromResponse } = info;
-  const pkExpr = pkIsNumeric ? `Number(req.params.${pkColName})` : `req.params.${pkColName}`;
+  const { varName, pkColName, pkIsNumeric, pkColNames, isCompositePk, allColNames, excludeFromResponse, fkJoins } =
+    info;
+
+  // Build PK where expression and returning object depending on single vs composite PK
+  let pkWhereExpr = '';
+  let pkReturningObj = '';
+  let pkSplitPrologue = '';
+  if (isCompositePk) {
+    const eqs = pkColNames.map((name, i) => `eq(table.${name}, parts[${i}])`).join(', ');
+    pkWhereExpr = `and(${eqs})`;
+    pkSplitPrologue = "  const parts = req.params.__key.split('|');\n";
+    const retFields = pkColNames.map(name => `  ${name}: table.${name}`).join(',\n');
+    pkReturningObj = `{\n${retFields}\n}`;
+  } else {
+    const pkExpr = pkIsNumeric ? `Number(req.params.${pkColName})` : `req.params.${pkColName}`;
+    pkWhereExpr = `eq(table.${pkColName}, ${pkExpr})`;
+    pkReturningObj = `{ ${pkColName}: table.${pkColName} }`;
+  }
 
   // Build explicit column select when sensitive fields must be excluded from responses
   const safeColNames = allColNames.filter(c => !excludeFromResponse.includes(c));
   const hasExclusions = excludeFromResponse.length > 0;
   const selectArgLines = safeColNames.map(c => `      ${c}: table.${c},`).join('\n');
-  const selectCall = hasExclusions ? `.select({\n${selectArgLines}\n    })` : '.select()';
+
+  // Build FK_CONFIG array — static metadata consumed by join-utils at runtime
+  const fkConfigCode = fkJoins.length
+    ? `const FK_CONFIG = [\n${fkJoins.map(fk => `  { col: '${fk.colName}', ref: '${fk.refVar}', pk: '${fk.refPkCol}', text: '${fk.refTextCol}' }`).join(',\n')}\n];\n`
+    : '';
+
+  // Build select calls — one with FK join fields (for display queries),
+  // one without (for CSV export where raw FK values are preferred)
+  const fkSelectSpread = fkJoins.length ? `\n      ...buildFkSelectFields(FK_CONFIG)` : '';
+  let selectCall: string;
+  const selectCallCsv: string = hasExclusions ? `.select({\n${selectArgLines}\n    })` : '.select()';
+  if (hasExclusions) {
+    selectCall = `.select({\n${selectArgLines}${fkSelectSpread}\n    })`;
+  } else if (fkJoins.length) {
+    selectCall = `.select({\n      ...table,${fkSelectSpread}\n    })`;
+  } else {
+    selectCall = selectCallCsv;
+  }
+
+  // FK join runtime code — shared by find and findOne
+  const fkJoinBlock = fkJoins.length
+    ? `  const { query: joinedQuery, joinCols, hasJoins } = addFkJoins(query, FK_CONFIG, table);\n  query = joinedQuery;\n`
+    : '';
+
+  // Transform rows for FK display values — find (array) and findOne (single row)
+  const fkTransformBlock = fkJoins.length ? `  if (hasJoins) rows = transformFkDisplay(rows, joinCols);\n` : '';
+  const fkTransformBlockOne = fkJoins.length ? `  if (hasJoins) row = transformFkDisplayOne(row, joinCols);\n` : '';
+
+  // Add __key to each row (T4T frontend uses it as row key)
+  const keyTransformBlock = isCompositePk
+    ? `  rows = rows.map(r => ({ ...r, __key: ${pkColNames.map(n => `r.${n}`).join(" + '|' + ")} }));\n`
+    : `  rows = rows.map(r => ({ ...r, __key: String(r.${pkColName}) }));\n`;
+  const keyTransformBlockOne = isCompositePk
+    ? `  row = { ...row, __key: ${pkColNames.map(n => `row.${n}`).join(" + '|' + ")} };\n`
+    : `  row = { ...row, __key: String(row.${pkColName}) };\n`;
+
+  // Additional imports when FK joins exist
+  const fkExtra = fkJoins.length ? ', buildFkSelectFields, addFkJoins, transformFkDisplay, transformFkDisplayOne' : '';
+  const configImportCode = `import supplement from '../t4t-supplement.ts';\nimport { mergeWithSupplement } from '@common/node/t4t/t4t-schema';\nimport { tableRefMap${fkExtra} } from '@common/node/t4t/t4t-utils';\n`;
 
   return `${AUTO_HEADER(varName)}import * as realServices from '@common/node/services';
+import { parse as csvParse } from 'csv-parse/sync';
+import { Parser } from '@json2csv/plainjs';
 import { ${varName} as table } from '${schemaModule}';
-import { eq } from 'drizzle-orm';
-
+import { and, asc, count, desc, eq, inArray, like, or } from 'drizzle-orm';
+${configImportCode}
 // biome-ignore lint/suspicious/noExplicitAny: services interface varies by store type
 let services: any = realServices;
 
@@ -475,50 +591,131 @@ export const _injectServices = (mock: any) => {
 
 const db = () => services.get('${dbName}');
 
+${fkConfigCode}
 const create = async (req, res) => {
-  const result = await db().insert(table).values(req.body).returning({ ${pkColName}: table.${pkColName} });
+  // Strip empty/null values that survive Zod preprocess
+  const body = Object.fromEntries(Object.entries(req.body).filter(([_, v]) => v !== '' && v !== null));
+  const result = await db().insert(table).values(body).returning(${pkReturningObj});
   return res.status(201).json(result[0]);
 };
 
 const findOne = async (req, res) => {
-  const rows = await db()
+${pkSplitPrologue}  let query = db()
     ${selectCall}
-    .from(table)
-    .where(eq(table.${pkColName}, ${pkExpr}))
+    .from(table);
+${fkJoinBlock}  query = query
+    .where(${pkWhereExpr})
     .limit(1);
-  if (rows.length) return res.status(200).json(rows[0]);
-  return res.status(404).json({});
+  const rows = await query;
+  if (!rows.length) return res.status(404).json({});
+  let row = rows[0];
+${keyTransformBlockOne}  return res.status(200).json(row);
 };
 
 const update = async (req, res) => {
-  const result = await db()
+${pkSplitPrologue}  const result = await db()
     .update(table)
     .set(req.body)
-    .where(eq(table.${pkColName}, ${pkExpr}));
+    .where(${pkWhereExpr});
   const count = result.rowCount ?? 0;
   return res.status(count ? 200 : 404).json({ count });
 };
 
 const find = async (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 10;
-  const page = req.query.page ? Number(req.query.page) : 0;
-  const result = await db()
-    ${selectCall}
+  const rawPage = req.query.page ? Number(req.query.page) : 1;
+  const page = rawPage < 1 ? 1 : rawPage;
+  const limit = req.query.limit ? Number(req.query.limit) : 25;
+  const filters = req.query.filters ? JSON.parse(req.query.filters) : null;
+  const sorter = req.query.sorter ? JSON.parse(req.query.sorter) : [];
+  const csv = req.query.csv;
+
+  const filterConds = [];
+  if (filters?.length) {
+    for (const f of filters) {
+      if (!table[f.col]) continue;
+      filterConds.push(f.op === 'like' ? like(table[f.col], '%' + f.val + '%') : eq(table[f.col], f.val));
+    }
+  }
+
+  const [{ value: total }] = await db()
+    .select({ value: count() })
     .from(table)
+    .where(and(...filterConds));
+
+  if (csv) {
+    let csvQuery = db()
+      ${selectCallCsv}
+      .from(table);
+    if (filterConds.length) csvQuery = csvQuery.where(and(...filterConds));
+    if (sorter.length) {
+      for (const s of sorter) {
+        csvQuery = csvQuery.orderBy(s.order === 'desc' ? desc(table[s.column]) : asc(table[s.column]));
+      }
+    }
+    const csvRows = await csvQuery;
+    const parser = new Parser({});
+    return res.json({ csv: parser.parse(csvRows) });
+  }
+
+  let query = db()
+    ${selectCall}
+    .from(table);
+${fkJoinBlock}  if (filterConds.length) query = query.where(and(...filterConds));
+  if (sorter.length) {
+    for (const s of sorter) {
+      query = query.orderBy(s.order === 'desc' ? desc(table[s.column]) : asc(table[s.column]));
+    }
+  }
+
+  const maxPage = Math.ceil(Number(total) / limit);
+  const effectivePage = page > maxPage ? Math.max(maxPage, 1) : page;
+  let rows = await query
     .limit(limit)
-    .offset((page > 0 ? page - 1 : 0) * limit);
-  return res.status(200).json(result);
+    .offset((effectivePage > 0 ? effectivePage - 1 : 0) * limit);
+
+${fkTransformBlock}${keyTransformBlock}  return res.json({ results: rows, total: Number(total) });
 };
 
 const remove = async (req, res) => {
-  const result = await db()
+${pkSplitPrologue}  const result = await db()
     .delete(table)
-    .where(eq(table.${pkColName}, ${pkExpr}));
+    .where(${pkWhereExpr});
   const count = result.rowCount ?? 0;
   return res.status(count ? 200 : 404).json({ count });
 };
 
-export default { create, findOne, update, find, remove };
+const removeBatch = async (req, res) => {
+  const { ids }: { ids: string[] } = req.body;
+  if (!ids?.length) return res.status(400).json({ error: 'No ids provided' });
+${isCompositePk ? `  for (const id of ids) {\n    const parts = (id as string).split('|');\n    await db().delete(table).where(and(${pkColNames.map((n, j) => `eq(table.${n}, parts[${j}])`).join(', ')}));\n  }\n  return res.json({ deletedRows: ids.length });` : `  const pkValues = ids.map((id: string) => ${pkIsNumeric ? 'Number(id)' : 'id'});\n  const result = await db().delete(table).where(inArray(table.${pkColName}, pkValues));\n  return res.json({ deletedRows: result.rowCount ?? ids.length });`}
+};
+
+const autocomplete = async (req, res) => {
+  const { key, text, search, limit = 20 } = req.body;
+  const conds = [like(table[key], '%' + search + '%'), like(table[text], '%' + search + '%')];
+  const rows = await db().select().from(table).where(or(...conds)).limit(Number(limit));
+  res.json(rows.map(row => ({
+    key: row[key],
+    text: row[text],
+  })));
+};
+
+const upload = async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const records = csvParse(req.file.buffer.toString('utf-8'), { columns: true, skip_empty_lines: true });
+  const result = await db().insert(table).values(records);
+  return res.json({ inserted: result.rowCount ?? records.length });
+};
+
+const getConfig = async (_req, res) => {
+  const drizzleTable = tableRefMap['${varName}'];
+  if (!drizzleTable) return res.json(supplement);
+  const merged = mergeWithSupplement('${varName}', drizzleTable as any, supplement);
+  const { ref: _ref, db: _db, ...config } = merged as any;
+  res.json(config);
+};
+
+export default { create, findOne, update, find, remove, removeBatch, autocomplete, upload, getConfig };
 `;
 }
 
@@ -668,15 +865,37 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
   // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
   const columns = getColumns(exported as any);
 
-  // Only generate for tables with a single-column primary key
+  // Detect primary key columns — supports column-level .primaryKey() and table-level primaryKey() helper
   // biome-ignore lint/suspicious/noExplicitAny: drizzle column internals
-  const pkEntry = Object.entries(columns).find(([, col]) => (col as any).primary === true);
-  if (!pkEntry) {
-    skipped.push(`${varName} (no single-column primary key — skipped)`);
+  const pkEntries = Object.entries(columns).filter(([, col]) => (col as any).primary === true);
+  // For composite PKs defined via primaryKey({ columns: [...] }) table helper
+  // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+  const extraConfigBuilder = (exported as any)[Symbol.for('drizzle:ExtraConfigBuilder')];
+  if (extraConfigBuilder) {
+    // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+    const extraConfigColumns = (exported as any)[Symbol.for('drizzle:ExtraConfigColumns')];
+    const extraConfigs = extraConfigBuilder(extraConfigColumns);
+    for (const cfg of extraConfigs) {
+      if (cfg.constructor?.name === 'PrimaryKeyBuilder' && cfg.columns?.length) {
+        for (const col of cfg.columns) {
+          const colName = typeof col === 'string' ? col : col.name;
+          const entry = Object.entries(columns).find(([n]) => n === colName);
+          if (entry && !pkEntries.some(([n]) => n === entry[0])) {
+            pkEntries.push(entry);
+          }
+        }
+      }
+    }
+  }
+  if (!pkEntries.length) {
+    skipped.push(`${varName} (no primary key — skipped)`);
     continue;
   }
 
-  const [pkColName, pkCol] = pkEntry;
+  const pkColNames = pkEntries.map(([name]) => name);
+  const isCompositePk = pkColNames.length > 1;
+  const [firstPkColName, pkCol] = pkEntries[0];
+  const pkColName = isCompositePk ? '__key' : firstPkColName;
   // biome-ignore lint/suspicious/noExplicitAny: drizzle column internals
   const pkSqlType: string = (pkCol as any).getSQLType?.() ?? 'unknown';
   const pkBase = pkSqlType.toLowerCase().split('(')[0].split(' ')[0].trim();
@@ -690,10 +909,18 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
   // All column names — used for explicit SELECT when excludeFromResponse is set
   const allColNames = Object.keys(columns);
 
-  // Build body fields — exclude PK, server-managed SQL-expression columns, and config-excluded columns
+  // Build body fields — exclude auto-increment PKs (serial), server-managed SQL-expression columns, and config-excluded columns
   const bodyFields: BodyField[] = Object.entries(columns)
     // biome-ignore lint/suspicious/noExplicitAny: drizzle column internals
-    .filter(([colName, col]) => !(col as any).primary && !excludeFromBodySet.has(colName))
+    .filter(([colName, col]) => {
+      if (excludeFromBodySet.has(colName)) return false;
+      const c = col as any;
+      if (!c.primary || isCompositePk) return true;
+      // Only exclude auto-increment PKs (serial/bigserial) — manual PKs like varchar go in body
+      const sqlType: string = c.getSQLType?.() ?? 'unknown';
+      const base = sqlType.toLowerCase().split('(')[0].split(' ')[0].trim();
+      return !['serial', 'bigserial'].includes(base);
+    })
     .filter(([, col]) => {
       // biome-ignore lint/suspicious/noExplicitAny: drizzle column internals
       const c = col as any;
@@ -713,6 +940,7 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
         name: colName,
         zodCode: sqlTypeToZodCode(sqlType),
         required: notNull && !hasDefault,
+        sqlType,
       };
     });
 
@@ -733,16 +961,55 @@ for (const [varName, exported] of Object.entries(schemaExports)) {
 
   const kebabName = toKebabCase(varName);
   const pascalName = toPascalCase(varName);
+
+  // ── FK join detection ──────────────────────────────────────────────────
+  // Detect FK constraints from the Drizzle schema and match against supplement options.text
+  const InlineForeignKeysSym = Symbol.for('drizzle:PgInlineForeignKeys');
+  // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+  const rawFks: any[] = (exported as any)[InlineForeignKeysSym] ?? [];
+  const schemaVarMap: Record<string, string> = {};
+  for (const [key, val] of Object.entries(schemaExports)) {
+    // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+    if (val && typeof val === 'object' && (val as any)?.constructor?.name === 'PgTable') {
+      // biome-ignore lint/suspicious/noExplicitAny: drizzle table internals
+      schemaVarMap[(val as any)[Symbol.for('drizzle:Name')] ?? key] = key;
+    }
+  }
+  // Try loading supplement to get options.text for FK display columns
+  // biome-ignore lint/suspicious/noExplicitAny: supplement shape is per-table
+  let supplementCols: Record<string, any> = {};
+  try {
+    const suppPath = resolve(appRoot, 'src', kebabName, 't4t-supplement.ts');
+    const mod = await import(pathToFileURL(suppPath).href);
+    supplementCols = mod.default?.cols ?? {};
+  } catch {}
+  const fkJoins: FkJoinInfo[] = [];
+  for (const fk of rawFks) {
+    const ref = fk.reference?.();
+    if (!ref?.columns?.length || !ref?.foreignColumns?.length || !ref?.foreignTable) continue;
+    const localColName = ref.columns[0].name;
+    const refTextCol = supplementCols[localColName]?.options?.text;
+    if (!refTextCol) continue;
+    const foreignDbName = ref.foreignTable[Symbol.for('drizzle:Name')];
+    const refVar = schemaVarMap[foreignDbName];
+    if (!refVar) continue;
+    const refPkCol = ref.foreignColumns[0].name;
+    fkJoins.push({ colName: localColName, refVar, refPkCol, refTextCol });
+  }
+
   const info: TableInfo = {
     varName,
     pascalName,
     kebabName,
     pkColName,
+    pkColNames,
+    isCompositePk,
     pkIsNumeric,
     bodyFields,
     responseFields,
     allColNames,
     excludeFromResponse,
+    fkJoins,
   };
 
   const tableDir = resolve(appRoot, 'src', kebabName);

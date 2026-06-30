@@ -27,7 +27,13 @@ export function validate(target, schema) {
       const message = result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ');
       return next(new ValidationError(message));
     }
-    req[target] = result.data;
+    // Express 5 makes req.query read-only (getter-only).
+    // Object.defineProperty works in both Express 4 and 5.
+    Object.defineProperty(req, target, {
+      value: result.data,
+      writable: true,
+      configurable: true,
+    });
     return next();
   };
 }

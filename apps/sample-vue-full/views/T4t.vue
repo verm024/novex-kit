@@ -31,6 +31,9 @@
       <a-button v-if="props?.filterKeys" @click="goBack" class="button-variation-1"
         ><span class="button-variation-1-label">Back</span></a-button
       >
+      <a-button @click="toggleApiVersion" class="button-variation-1"
+        ><span class="button-variation-1-label">{{ apiVersionLabel }}</span></a-button
+      >
     </div>
     <a-table
       :columns="table.columns"
@@ -172,10 +175,10 @@
 import { CloseOutlined } from '@ant-design/icons-vue';
 import { getLocaleDateTimeTzISO, getTzOffsetISO, getYmdhmsUtc } from '@common/iso/datetime';
 import { http } from '@common/vue/plugins/fetch.js';
-import * as t4tFe from '@common/web/t4t-fe'; // Reference - https://github.com/es-labs/jslib/blob/main/libs/esm/t4t-fe.js
+import * as t4tFeV1 from '@common/web/t4t-fe'; // Reference - https://github.com/es-labs/jslib/blob/main/libs/esm/t4t-fe.js
 import { debounce, downloadData } from '@common/web/util';
 import { notification } from 'ant-design-vue';
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useMainStore } from '../store.js';
 
@@ -184,12 +187,33 @@ const DEFAULT_PAGE_SIZE = 10;
 
 export default {
   name: 'T4t',
-  props: ['tableName', 'filterKeys', 'filterVals'],
+  props: {
+    tableName: { type: String, required: true },
+    filterKeys: String,
+    filterVals: String,
+    apiVersion: { type: String, default: 'v1' },
+  },
   components: {
     CloseOutlined,
   },
   setup(props, context) {
-    console.log('t4t - v0.0.2');
+    let t4tFe = t4tFeV1;
+    const currentApiVersion = ref(props.apiVersion || 'v1');
+    const apiVersionLabel = computed(() => `API:${currentApiVersion.value}`);
+    const toggleApiVersion = async () => {
+      const next = currentApiVersion.value === 'v1' ? 'v2' : 'v1';
+      if (next === 'v2') {
+        t4tFe = await import('@common/web/t4t-fe-v2');
+      } else {
+        t4tFe = t4tFeV1;
+      }
+      t4tFe.setUrlPrefix(next === 'v2' ? '/api/sample-api' : '/api');
+      t4tFe.setFetch(http);
+      t4tFe.setTableName(props.tableName);
+      currentApiVersion.value = next;
+      if (table.config) await fetchData();
+    };
+    console.log('t4t - v0.0.2', `api:${currentApiVersion.value}`);
     const store = useMainStore();
     const router = useRouter();
     // const loading = store.loading
@@ -355,16 +379,25 @@ export default {
           jsonData[col] = new Date(table.formData[col]).toISOString(); // 2024-12-24 08:00 - 16 chars... convert to ISO
         }
       }
-      formData.append('json', JSON.stringify(jsonData));
       if (store.loading === false) {
         store.loading = true;
         const message = formMode.value === 'add' ? 'Add' : 'Update';
         const duration = 3; // seconds
         try {
-          if (formMode.value === 'add') {
-            await t4tFe.create(formData);
+          if (currentApiVersion.value === 'v2') {
+            // v2 generated routes expect JSON body directly
+            if (formMode.value === 'add') {
+              await t4tFe.create(jsonData);
+            } else {
+              await t4tFe.update(table.formKey, jsonData);
+            }
           } else {
-            await t4tFe.update(table.formKey, formData);
+            formData.append('json', JSON.stringify(jsonData));
+            if (formMode.value === 'add') {
+              await t4tFe.create(formData);
+            } else {
+              await t4tFe.update(table.formKey, formData);
+            }
           }
           await fetchData();
           notification.open({ message, duration, description: 'Success' });
@@ -444,6 +477,10 @@ export default {
     // const getRowKey = (record) => table.keyCols.map(keyCol => record[keyCol]).join('|')
 
     onMounted(async () => {
+      if (currentApiVersion.value === 'v2') {
+        t4tFe = await import('@common/web/t4t-fe-v2');
+        t4tFe.setUrlPrefix('/api/sample-api');
+      }
       t4tFe.setFetch(http);
       t4tFe.setTableName(props.tableName);
       // console.log(props, context)
@@ -606,6 +643,9 @@ export default {
 
     return {
       props,
+      currentApiVersion,
+      apiVersionLabel,
+      toggleApiVersion,
       goBack: () => router.go(-1),
       colShow: val => (formMode.value === 'add' && val.add) || (formMode.value === 'edit' && val.edit),
       colUiType: (val, uiType) => val?.ui?.tag === uiType,
